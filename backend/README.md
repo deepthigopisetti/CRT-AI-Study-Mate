@@ -43,11 +43,20 @@ Create `.env` file:
 ```env
 SECRET_KEY=studentcompanion123
 JWT_SECRET_KEY=myjwtsecret
-GROQ_API_KEY=your_api_key_here
-GROQ_MODEL=llama-3.3-70b-versatile
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen2.5:3b
 ```
 
-### 4. Run Server
+### 4. Install and Start Ollama
+
+Download Ollama from https://ollama.com and run:
+
+```bash
+ollama pull qwen2.5:3b
+ollama serve
+```
+
+### 5. Run Server
 
 ```bash
 python app.py
@@ -263,7 +272,7 @@ created_at: DateTime
 ## 🤖 AI Services
 
 ### AI Service (`services/ai_service.py`)
-- Generates note summaries using Groq LLM
+- Generates note summaries using a local Ollama/Qwen model
 - Processes natural language queries
 - Generates quiz questions from notes
 
@@ -287,9 +296,13 @@ Flask==3.1.3
 Flask-CORS==6.0.5
 Flask-JWT-Extended==4.7.4
 Flask-SQLAlchemy==3.1.1
+fastapi>=0.100.0,<1.0.0
+pydantic>=2.0.0,<3.0.0
 python-dotenv==1.2.2
 requests==2.34.2
 SQLAlchemy==2.0.51
+python-multipart>=0.0.9
+pypdf>=5.0.0,<7.0.0
 ```
 
 ## 🐛 Troubleshooting

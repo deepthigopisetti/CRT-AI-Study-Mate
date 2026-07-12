@@ -5,80 +5,67 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
-def call_gemini_api(prompt):
+
+def _is_error_response(text):
     """
-    Calls the Gemini API directly using HTTP requests.
-    Returns the generated text response, or None if it fails or no key is present.
+    Detects provider error messages (e.g. text-only models rejecting image input)
+    so they can be treated as a failure and trigger the offline fallback.
     """
-    if not GEMINI_API_KEY:
-        return None
+    if not text:
+        return False
+    lowered = text.lower()
+    markers = [
+        "does not support image",
+        "cannot read",
+        "image input",
+        "unsupported image",
+        '"error"',
+        "error:",
+    ]
+    return any(m in lowered for m in markers)
+
+
+def call_ollama_api(prompt):
+    """
+    Calls a locally running Ollama server and returns the generated text response.
+    Returns None on any failure (network, HTTP error, or model error) so the
+    caller can fall back to the offline generator.
+    """
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        headers = {"Content-Type": "application/json"}
+        url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
         payload = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }]
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.3}
         }
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response = requests.post(url, json=payload, timeout=90)
         if response.status_code == 200:
             res_data = response.json()
-            return res_data['candidates'][0]['content']['parts'][0]['text']
-        else:
-            print(f"Gemini API Error {response.status_code}: {response.text}")
-            return None
+            # Ollama may return 200 with an "error" key on invalid requests
+            if "error" in res_data:
+                print(f"Ollama API Error: {res_data['error']}")
+                return None
+            text = res_data.get("response", "").strip()
+            # Reject raw provider errors (e.g. image sent to a text-only model)
+            if _is_error_response(text):
+                print(f"Ollama returned an error response: {text}")
+                return None
+            return text
+        print(f"Ollama API Error {response.status_code}: {response.text}")
     except Exception as e:
-        print(f"Exception during Gemini API call: {e}")
-        return None
+        print(f"Exception during Ollama API call: {e}")
+    return None
 
-def call_groq_api(prompt):
-    """
-    Calls the Groq API directly using HTTP requests (OpenAI compat).
-    Returns the generated text response, or None if it fails or no key is present.
-    """
-    if not GROQ_API_KEY:
-        return None
-    try:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {GROQ_API_KEY}"
-        }
-        payload = {
-            "model": GROQ_MODEL,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.3
-        }
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        if response.status_code == 200:
-            res_data = response.json()
-            return res_data['choices'][0]['message']['content']
-        else:
-            print(f"Groq API Error {response.status_code}: {response.text}")
-            return None
-    except Exception as e:
-        print(f"Exception during Groq API call: {e}")
-        return None
 
 def call_ai(prompt):
     """
-    Attempts to call Groq first if key exists, then falls back to Gemini.
+    Uses Ollama locally for all AI generation tasks.
     """
-    if GROQ_API_KEY:
-        res = call_groq_api(prompt)
-        if res:
-            return res
-    if GEMINI_API_KEY:
-        res = call_gemini_api(prompt)
-        if res:
-            return res
-    return None
+    return call_ollama_api(prompt)
 
 def generate_summary(text):
     """
@@ -152,7 +139,11 @@ def generate_quiz(topic, count=5):
         except Exception as e:
             print(f"Failed to parse Gemini quiz JSON: {e}. Raw response: {response}")
             
-    # Fallback Quiz Generator
+    return _fallback_quiz(topic, count)
+
+
+def _fallback_quiz(topic, count=5):
+    """Offline quiz generator used when the LLM is unavailable."""
     fallback_quizzes = {
         "operating systems": [
             {"question": "What is the main purpose of an Operating System?", "options": ["To compile code", "To act as an intermediary between user and hardware", "To connect to the internet", "To design graphics"], "correctAnswer": 1},
@@ -169,14 +160,51 @@ def generate_quiz(topic, count=5):
             {"question": f"Why is {topic} taught in modern education?", "options": ["To increase computer usage", "To build foundational and problem-solving skills", "To satisfy registration requirements", "To teach keyboard typing speed"], "correctAnswer": 1}
         ]
     }
-    
-    key = topic.lower().strip()
+
+    key = (topic or "").lower().strip()
     if key in fallback_quizzes:
-        return fallback_quizzes[key]
-    else:
-        # Personalize default quiz
-        quiz = list(fallback_quizzes["default"])
-        return quiz
+        return list(fallback_quizzes[key])[:count]
+    return list(fallback_quizzes["default"])[:count]
+
+
+def generate_quiz_from_text(text, subject="", topic="", count=5):
+    """
+    Generates multiple-choice quiz questions from extracted PDF/notes text.
+    Returns a list of dicts with 'question', 'options' (4 strings), 'correctAnswer' (0-indexed int).
+    Falls back to the offline generator when the LLM is unavailable.
+    """
+    label = topic or subject or "the uploaded study material"
+    context = (text or "").strip()
+
+    if context:
+        prompt = (
+            f"You are an expert teacher. Create a multiple-choice quiz from the following study notes "
+            f"about '{label}'. Generate exactly {count} questions.\n"
+            f"Return ONLY a JSON array of objects. Do not include markdown code block tags or backticks. "
+            f"Each object must have the following keys:\n"
+            f"- 'question': the question text\n"
+            f"- 'options': an array of exactly 4 strings (options a-d)\n"
+            f"- 'correctAnswer': the 0-indexed integer of the correct option\n"
+            f"Study Notes:\n{context[:8000]}\n\n"
+            f"Example:\n"
+            f"[{{\"question\": \"What is 2+2?\", \"options\": [\"3\", \"4\", \"5\", \"6\"], \"correctAnswer\": 1}}]"
+        )
+        response = call_ai(prompt)
+        if response:
+            try:
+                cleaned = response.strip()
+                if cleaned.startswith("```json"):
+                    cleaned = cleaned[7:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+                questions = json.loads(cleaned)
+                if isinstance(questions, list) and len(questions) > 0:
+                    return questions
+            except Exception as e:
+                print(f"Failed to parse generated quiz JSON: {e}. Raw response: {response}")
+
+    return _fallback_quiz(label, count)
 
 def generate_study_plan(subjects, exam_dates):
     """

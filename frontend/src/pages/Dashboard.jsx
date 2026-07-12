@@ -2,6 +2,19 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import API from "../services/api";
 
+const API_ROOT = "http://127.0.0.1:8000";
+
+// Strips raw model/image errors (e.g. "does not support image input") so the UI
+// never displays a cryptic provider error. The app is text-only.
+function cleanModelMessage(text) {
+    if (typeof text !== "string") return text;
+    const lower = text.toLowerCase();
+    if (lower.includes("does not support image") || lower.includes("cannot read") || lower.includes("image input") || lower.includes("unsupported image")) {
+        return "🖼️ Images aren't supported yet — please type your question as text. The AI uses a text-only model.";
+    }
+    return text;
+}
+
 function Dashboard() {
     const navigate = useNavigate();
     
@@ -103,6 +116,27 @@ function Dashboard() {
         }
     };
 
+    // ----------------------------------------------------
+    // Tab: Weakness Detection
+    // ----------------------------------------------------
+    const [weaknessData, setWeaknessData] = useState(null);
+    const [weaknessLoading, setWeaknessLoading] = useState(false);
+    const [weaknessError, setWeaknessError] = useState("");
+
+    const fetchWeakness = async () => {
+        setWeaknessLoading(true);
+        setWeaknessError("");
+        try {
+            const res = await API.get("/weakness");
+            setWeaknessData(res.data);
+        } catch (err) {
+            console.error("Failed to load weakness report:", err);
+            setWeaknessError(err.response?.data?.message || "Failed to load weakness report.");
+        } finally {
+            setWeaknessLoading(false);
+        }
+    };
+
     const getChatSessions = () => {
         const sessions = {};
         chatHistory.forEach(chat => {
@@ -139,6 +173,143 @@ function Dashboard() {
     useEffect(() => {
         if (activeTab === "chat") {
             fetchChatHistory();
+        }
+    }, [activeTab]);
+
+    useEffect(() => {
+        if (activeTab === "weakness") {
+            fetchWeakness();
+        }
+    }, [activeTab]);
+
+    // ----------------------------------------------------
+    // Tab: Teacher Mode
+    // ----------------------------------------------------
+    const [teacherId, setTeacherId] = useState(1);
+    const [teacherSubject, setTeacherSubject] = useState("");
+    const [teacherUnit, setTeacherUnit] = useState("");
+    const [teacherFile, setTeacherFile] = useState(null);
+    const [teacherAnalytics, setTeacherAnalytics] = useState(null);
+    const [teacherStudents, setTeacherStudents] = useState([]);
+    const [teacherLoading, setTeacherLoading] = useState(false);
+    const [teacherError, setTeacherError] = useState("");
+    const [teacherMsg, setTeacherMsg] = useState("");
+    const [teacherGenerated, setTeacherGenerated] = useState([]);
+
+    const fetchTeacherData = async () => {
+        setTeacherLoading(true);
+        setTeacherError("");
+        try {
+            const [analyticsRes, studentsRes] = await Promise.all([
+                API.get(`${API_ROOT}/teacher/analytics`),
+                API.get(`${API_ROOT}/teacher/students-progress`),
+            ]);
+            setTeacherAnalytics(analyticsRes.data);
+            setTeacherStudents(studentsRes.data);
+        } catch (err) {
+            console.error("Failed to load teacher data:", err);
+            setTeacherError(err.response?.data?.detail || "Failed to load teacher data.");
+        } finally {
+            setTeacherLoading(false);
+        }
+    };
+
+    const handleUploadMaterial = async (e) => {
+        e.preventDefault();
+        setTeacherError("");
+        setTeacherMsg("");
+        if (!teacherFile) {
+            setTeacherError("Please choose a study material file.");
+            return;
+        }
+        try {
+            const formData = new FormData();
+            formData.append("file", teacherFile);
+            if (teacherSubject.trim()) formData.append("subject", teacherSubject);
+            if (teacherUnit.trim()) formData.append("unit", teacherUnit);
+            await API.post(`${API_ROOT}/teacher/upload-notes?teacher_id=${teacherId}`, formData, {
+                headers: { "Content-Type": "multipart/form-data" },
+            }).then((res) => {
+                const quizzes = res.data?.generated_quizzes || [];
+                setTeacherGenerated(quizzes);
+                const count = res.data?.quiz_count ?? quizzes.length;
+                setTeacherMsg(
+                    count > 0
+                        ? `Study material uploaded. ${count} quiz question(s) auto-generated from the PDF.`
+                        : "Study material uploaded successfully."
+                );
+            });
+            setTeacherFile(null);
+            const fi = document.getElementById("teacher-file-input");
+            if (fi) fi.value = "";
+            fetchTeacherData();
+        } catch (err) {
+            console.error(err);
+            setTeacherError(err.response?.data?.detail || "Failed to upload material.");
+        }
+    };
+
+    const [quizForm, setQuizForm] = useState({
+        subject: "", topic: "", question: "",
+        option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "", difficulty: "Medium",
+    });
+
+    const handleCreateQuiz = async (e) => {
+        e.preventDefault();
+        setTeacherError("");
+        setTeacherMsg("");
+        try {
+            await API.post(`${API_ROOT}/teacher/create-quiz`, { teacher_id: teacherId, ...quizForm });
+            setTeacherMsg("Quiz created successfully.");
+            setQuizForm({ subject: "", topic: "", question: "", option_a: "", option_b: "", option_c: "", option_d: "", correct_answer: "", difficulty: "Medium" });
+        } catch (err) {
+            console.error(err);
+            setTeacherError(err.response?.data?.detail || "Failed to create quiz.");
+        }
+    };
+
+    // ----------------------------------------------------
+    // Tab: Parent Dashboard
+    // ----------------------------------------------------
+    const [parentStudentId, setParentStudentId] = useState(1);
+    const [parentProgress, setParentProgress] = useState(null);
+    const [parentQuizPerf, setParentQuizPerf] = useState([]);
+    const [parentAssignments, setParentAssignments] = useState([]);
+    const [parentWeak, setParentWeak] = useState([]);
+    const [parentLoading, setParentLoading] = useState(false);
+    const [parentError, setParentError] = useState("");
+
+    const fetchParentData = async (id = parentStudentId) => {
+        setParentLoading(true);
+        setParentError("");
+        try {
+            const [prog, perf, asg, weak] = await Promise.all([
+                API.get(`${API_ROOT}/parent/student-progress/${id}`),
+                API.get(`${API_ROOT}/parent/quiz-performance/${id}`),
+                API.get(`${API_ROOT}/parent/assignment-status/${id}`),
+                API.get(`${API_ROOT}/parent/weak-subjects/${id}`),
+            ]);
+            setParentProgress(prog.data);
+            setParentQuizPerf(perf.data);
+            setParentAssignments(asg.data);
+            setParentWeak(weak.data);
+        } catch (err) {
+            console.error("Failed to load parent data:", err);
+            setParentError(err.response?.data?.detail || "Failed to load student progress.");
+        } finally {
+            setParentLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (activeTab === "teacher") {
+            fetchTeacherData();
+        }
+    }, [activeTab]);
+
+    useEffect(() => {
+        if (activeTab === "parent") {
+            fetchParentData();
         }
     }, [activeTab]);
 
@@ -496,6 +667,24 @@ function Dashboard() {
                             className={`w-full text-left px-4 py-3 rounded-lg text-sm font-semibold transition-all flex items-center gap-3 cursor-pointer ${activeTab === "quiz" ? "bg-gradient-to-r from-blue-600/25 to-purple-600/25 border border-blue-500/30 text-blue-300" : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200"}`}
                         >
                             ✏️ Quiz Generator
+                        </button>
+                        <button
+                            onClick={() => setActiveTab("weakness")}
+                            className={`w-full text-left px-4 py-3 rounded-lg text-sm font-semibold transition-all flex items-center gap-3 cursor-pointer ${activeTab === "weakness" ? "bg-gradient-to-r from-blue-600/25 to-purple-600/25 border border-blue-500/30 text-blue-300" : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200"}`}
+                        >
+                            🎯 Weakness Detection
+                        </button>
+                        <button
+                            onClick={() => setActiveTab("teacher")}
+                            className={`w-full text-left px-4 py-3 rounded-lg text-sm font-semibold transition-all flex items-center gap-3 cursor-pointer ${activeTab === "teacher" ? "bg-gradient-to-r from-blue-600/25 to-purple-600/25 border border-blue-500/30 text-blue-300" : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200"}`}
+                        >
+                            👩‍🏫 Teacher Mode
+                        </button>
+                        <button
+                            onClick={() => setActiveTab("parent")}
+                            className={`w-full text-left px-4 py-3 rounded-lg text-sm font-semibold transition-all flex items-center gap-3 cursor-pointer ${activeTab === "parent" ? "bg-gradient-to-r from-blue-600/25 to-purple-600/25 border border-blue-500/30 text-blue-300" : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200"}`}
+                        >
+                            🧑‍🎓 Parent Dashboard
                         </button>
                         <button
                             onClick={() => setActiveTab("planner")}
@@ -1253,6 +1442,301 @@ function Dashboard() {
 
                         </div>
 
+                    </div>
+                )}
+
+                {/* ---------------------------------------------------- */}
+                {/* TAB: WEAKNESS DETECTION */}
+                {/* ---------------------------------------------------- */}
+                {activeTab === "weakness" && (
+                    <div className="space-y-6">
+                        <div className="bg-slate-900/40 border border-slate-800 p-6 rounded-xl relative overflow-hidden">
+                            <div className="absolute top-0 right-0 w-48 h-48 bg-rose-500/5 rounded-full blur-3xl pointer-events-none"></div>
+                            <h3 className="font-bold text-slate-200 mb-1">🎯 Weakness Detection</h3>
+                            <p className="text-xs text-slate-500">
+                                Topics are ranked by your past quiz performance. Weak areas get a prioritized revision plan.
+                            </p>
+                        </div>
+
+                        {weaknessLoading && (
+                            <div className="text-center p-8 border border-dashed border-slate-800 rounded-lg text-slate-500 text-sm">
+                                Analyzing your quiz performance...
+                            </div>
+                        )}
+
+                        {weaknessError && (
+                            <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 rounded-lg text-sm text-center">
+                                {weaknessError}
+                            </div>
+                        )}
+
+                        {!weaknessLoading && !weaknessError && weaknessData && weaknessData.total_topics === 0 && (
+                            <div className="text-center p-8 border border-dashed border-slate-800 rounded-lg text-slate-600 text-sm">
+                                No quiz records found. Take a quiz first to detect weak topics!
+                            </div>
+                        )}
+
+                        {!weaknessLoading && !weaknessError && weaknessData && weaknessData.total_topics > 0 && (
+                            <>
+                                {/* Weakness Report */}
+                                <div className="bg-slate-900/60 border border-slate-800 p-6 rounded-xl space-y-4">
+                                    <h4 className="font-bold text-sm text-slate-300 uppercase tracking-wider">📉 Topic Weakness Report</h4>
+                                    {weaknessData.weakness.map((item, idx) => {
+                                        const color = item.priority === "High Priority"
+                                            ? "text-rose-400 border-rose-900/40 bg-rose-950/20"
+                                            : item.priority === "Medium Priority"
+                                                ? "text-amber-400 border-amber-900/40 bg-amber-950/20"
+                                                : "text-emerald-400 border-emerald-900/40 bg-emerald-950/20";
+                                        return (
+                                            <div key={idx} className={`flex items-center justify-between p-4 border rounded-xl ${color}`}>
+                                                <div>
+                                                    <h5 className="font-bold text-sm text-slate-100">{item.topic}</h5>
+                                                    <span className="text-[10px] text-slate-500">{item.priority}</span>
+                                                </div>
+                                                <div className="px-3 py-1 bg-slate-950 rounded border border-slate-800 text-sm font-semibold">
+                                                    <span className={color.split(" ")[0]}>{item.percentage}%</span>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {/* Revision Plan */}
+                                <div className="bg-slate-900/60 border border-slate-800 p-6 rounded-xl space-y-4">
+                                    <h4 className="font-bold text-sm text-slate-300 uppercase tracking-wider">📝 Personalized Revision Plan</h4>
+                                    {weaknessData.revision_plan.length === 0 ? (
+                                        <p className="text-sm text-emerald-400">Great job! No weak topics detected — keep up the good work.</p>
+                                    ) : (
+                                        weaknessData.revision_plan.map((item, idx) => (
+                                            <div key={idx} className="p-4 bg-slate-950/40 border border-slate-800 rounded-xl">
+                                                <div className="flex items-center justify-between">
+                                                    <h5 className="font-bold text-sm text-slate-100">{item.topic}</h5>
+                                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{item.priority}</span>
+                                                </div>
+                                                <p className="text-xs text-slate-400 mt-2">{item.suggested_task}</p>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </>
+                        )}
+                    </div>
+                )}
+
+                {/* ---------------------------------------------------- */}
+                {/* TAB: TEACHER MODE */}
+                {/* ---------------------------------------------------- */}
+                {activeTab === "teacher" && (
+                    <div className="space-y-6">
+                        <div className="bg-slate-900/40 border border-slate-800 p-6 rounded-xl relative overflow-hidden">
+                            <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-500/5 rounded-full blur-3xl pointer-events-none"></div>
+                            <h3 className="font-bold text-slate-200 mb-1">👩‍🏫 Teacher Mode</h3>
+                            <p className="text-xs text-slate-500">Upload study materials, create quizzes, and view class analytics.</p>
+                            <div className="mt-3 max-w-xs">
+                                <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Teacher ID</label>
+                                <input
+                                    type="number"
+                                    value={teacherId}
+                                    onChange={(e) => setTeacherId(Number(e.target.value) || 1)}
+                                    className="w-full px-3 py-2 text-sm bg-slate-950/60 border border-slate-800 rounded-lg text-slate-100"
+                                />
+                            </div>
+                        </div>
+
+                        {teacherError && (
+                            <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 rounded-lg text-sm text-center">{teacherError}</div>
+                        )}
+                        {teacherMsg && (
+                            <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg text-sm text-center">{teacherMsg}</div>
+                        )}
+
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            {/* Upload Material */}
+                            <form onSubmit={handleUploadMaterial} className="bg-slate-900/60 border border-slate-800 p-6 rounded-xl space-y-3">
+                                <h4 className="font-bold text-sm text-slate-300 uppercase tracking-wider">📤 Upload Study Material</h4>
+                                <input type="text" placeholder="Subject (e.g. Math)" value={teacherSubject}
+                                    onChange={(e) => setTeacherSubject(e.target.value)}
+                                    className="w-full px-3 py-2 text-sm bg-slate-950/60 border border-slate-800 rounded-lg text-slate-100 placeholder-slate-600" />
+                                <input type="text" placeholder="Unit (e.g. Algebra)" value={teacherUnit}
+                                    onChange={(e) => setTeacherUnit(e.target.value)}
+                                    className="w-full px-3 py-2 text-sm bg-slate-950/60 border border-slate-800 rounded-lg text-slate-100 placeholder-slate-600" />
+                                <input id="teacher-file-input" type="file" onChange={(e) => setTeacherFile(e.target.files[0])}
+                                    className="w-full text-sm text-slate-400 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-blue-600/20 file:text-blue-300 hover:file:bg-blue-600/30 cursor-pointer" />
+                                <button type="submit" className="w-full px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white text-xs font-semibold rounded-lg cursor-pointer">Upload Material</button>
+                            </form>
+
+                            {/* Create Quiz */}
+                            <form onSubmit={handleCreateQuiz} className="bg-slate-900/60 border border-slate-800 p-6 rounded-xl space-y-2">
+                                <h4 className="font-bold text-sm text-slate-300 uppercase tracking-wider">✏️ Create Quiz</h4>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <input type="text" placeholder="Subject" value={quizForm.subject} onChange={(e) => setQuizForm({ ...quizForm, subject: e.target.value })} className="px-3 py-2 text-sm bg-slate-950/60 border border-slate-800 rounded-lg text-slate-100 placeholder-slate-600" />
+                                    <input type="text" placeholder="Topic" value={quizForm.topic} onChange={(e) => setQuizForm({ ...quizForm, topic: e.target.value })} className="px-3 py-2 text-sm bg-slate-950/60 border border-slate-800 rounded-lg text-slate-100 placeholder-slate-600" />
+                                </div>
+                                <input type="text" placeholder="Question" value={quizForm.question} onChange={(e) => setQuizForm({ ...quizForm, question: e.target.value })} className="w-full px-3 py-2 text-sm bg-slate-950/60 border border-slate-800 rounded-lg text-slate-100 placeholder-slate-600" />
+                                {["a", "b", "c", "d"].map((o) => (
+                                    <input key={o} type="text" placeholder={`Option ${o.toUpperCase()}`} value={quizForm["option_" + o]} onChange={(e) => setQuizForm({ ...quizForm, ["option_" + o]: e.target.value })} className="w-full px-3 py-2 text-sm bg-slate-950/60 border border-slate-800 rounded-lg text-slate-100 placeholder-slate-600" />
+                                ))}
+                                <input type="text" placeholder="Correct answer" value={quizForm.correct_answer} onChange={(e) => setQuizForm({ ...quizForm, correct_answer: e.target.value })} className="w-full px-3 py-2 text-sm bg-slate-950/60 border border-slate-800 rounded-lg text-slate-100 placeholder-slate-600" />
+                                <button type="submit" className="w-full px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white text-xs font-semibold rounded-lg cursor-pointer">Create Quiz</button>
+                            </form>
+                        </div>
+
+                        {/* Generated Quizzes from uploaded material */}
+                        {teacherGenerated.length > 0 && (
+                            <div className="bg-slate-900/60 border border-indigo-800/40 p-6 rounded-xl space-y-3">
+                                <h4 className="font-bold text-sm text-indigo-300 uppercase tracking-wider">🤖 Auto-Generated Quiz ({teacherGenerated.length})</h4>
+                                <div className="space-y-3">
+                                    {teacherGenerated.map((q) => (
+                                        <div key={q.id} className="p-3 bg-slate-950/40 border border-slate-800 rounded-lg space-y-2">
+                                            <p className="text-sm text-slate-200">{q.question}</p>
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-xs">
+                                                {[q.option_a, q.option_b, q.option_c, q.option_d].map((opt, i) => (
+                                                    <span key={i} className={`px-2 py-1 rounded border ${opt === q.correct_answer ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10" : "border-slate-800 text-slate-400"}`}>
+                                                        {String.fromCharCode(65 + i)}. {opt}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                            <span className="text-[10px] text-slate-500">{q.subject} · {q.topic}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Analytics */}
+                        {teacherLoading ? (
+                            <div className="text-center p-8 border border-dashed border-slate-800 rounded-lg text-slate-500 text-sm">Loading teacher analytics...</div>
+                        ) : teacherAnalytics && (
+                            <div className="bg-slate-900/60 border border-slate-800 p-6 rounded-xl space-y-4">
+                                <h4 className="font-bold text-sm text-slate-300 uppercase tracking-wider">📊 Class Analytics</h4>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                    <div className="p-4 bg-slate-950/40 border border-slate-800 rounded-xl text-center">
+                                        <p className="text-2xl font-extrabold text-indigo-400">{teacherAnalytics.total_students}</p>
+                                        <p className="text-[10px] text-slate-500 uppercase">Students</p>
+                                    </div>
+                                    <div className="p-4 bg-slate-950/40 border border-slate-800 rounded-xl text-center">
+                                        <p className="text-2xl font-extrabold text-cyan-400">{teacherAnalytics.total_quizzes}</p>
+                                        <p className="text-[10px] text-slate-500 uppercase">Quizzes</p>
+                                    </div>
+                                    <div className="p-4 bg-slate-950/40 border border-slate-800 rounded-xl text-center">
+                                        <p className="text-2xl font-extrabold text-emerald-400">{teacherAnalytics.average_score}%</p>
+                                        <p className="text-[10px] text-slate-500 uppercase">Avg Score</p>
+                                    </div>
+                                    <div className="p-4 bg-slate-950/40 border border-slate-800 rounded-xl text-center">
+                                        <p className="text-2xl font-extrabold text-amber-400">{teacherAnalytics.completion_rate}%</p>
+                                        <p className="text-[10px] text-slate-500 uppercase">Completion</p>
+                                    </div>
+                                </div>
+                                {teacherStudents.length > 0 && (
+                                    <div className="space-y-2 pt-2">
+                                        <h5 className="text-xs font-semibold text-slate-400 uppercase">Enrolled Students</h5>
+                                        {teacherStudents.map((s) => (
+                                            <div key={s.id} className="flex items-center justify-between p-3 bg-slate-950/40 border border-slate-800 rounded-lg">
+                                                <span className="text-sm text-slate-200">{s.name}</span>
+                                                <span className="text-[10px] text-slate-500">{s.course} · Year {s.year}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* ---------------------------------------------------- */}
+                {/* TAB: PARENT DASHBOARD */}
+                {/* ---------------------------------------------------- */}
+                {activeTab === "parent" && (
+                    <div className="space-y-6">
+                        <div className="bg-slate-900/40 border border-slate-800 p-6 rounded-xl relative overflow-hidden">
+                            <div className="absolute top-0 right-0 w-48 h-48 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none"></div>
+                            <h3 className="font-bold text-slate-200 mb-1">🧑‍🎓 Parent Dashboard</h3>
+                            <p className="text-xs text-slate-500">Plain-language progress summaries for your child.</p>
+                            <div className="mt-3 max-w-xs flex gap-2">
+                                <input type="number" value={parentStudentId}
+                                    onChange={(e) => setParentStudentId(Number(e.target.value) || 1)}
+                                    className="flex-1 px-3 py-2 text-sm bg-slate-950/60 border border-slate-800 rounded-lg text-slate-100" />
+                                <button onClick={() => fetchParentData()} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg cursor-pointer">View</button>
+                            </div>
+                        </div>
+
+                        {parentError && (
+                            <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 rounded-lg text-sm text-center">{parentError}</div>
+                        )}
+
+                        {parentLoading ? (
+                            <div className="text-center p-8 border border-dashed border-slate-800 rounded-lg text-slate-500 text-sm">Loading progress...</div>
+                        ) : parentProgress && (
+                            <>
+                                {/* Progress Summary */}
+                                <div className="bg-slate-900/60 border border-slate-800 p-6 rounded-xl space-y-4">
+                                    <h4 className="font-bold text-sm text-slate-300 uppercase tracking-wider">📈 {parentProgress.student_name}'s Progress</h4>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                        <div className="p-4 bg-slate-950/40 border border-slate-800 rounded-xl text-center">
+                                            <p className="text-2xl font-extrabold text-emerald-400">{parentProgress.attendance_rate}%</p>
+                                            <p className="text-[10px] text-slate-500 uppercase">Attendance</p>
+                                        </div>
+                                        <div className="p-4 bg-slate-950/40 border border-slate-800 rounded-xl text-center">
+                                            <p className="text-2xl font-extrabold text-cyan-400">{parentProgress.average_score}%</p>
+                                            <p className="text-[10px] text-slate-500 uppercase">Avg Score</p>
+                                        </div>
+                                        <div className="p-4 bg-slate-950/40 border border-slate-800 rounded-xl text-center">
+                                            <p className="text-2xl font-extrabold text-indigo-400">{parentProgress.study_minutes}</p>
+                                            <p className="text-[10px] text-slate-500 uppercase">Study Min</p>
+                                        </div>
+                                        <div className="p-4 bg-slate-950/40 border border-slate-800 rounded-xl text-center">
+                                            <p className="text-2xl font-extrabold text-amber-400">{parentProgress.completed_assignments}/{parentProgress.total_assignments}</p>
+                                            <p className="text-[10px] text-slate-500 uppercase">Assignments</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Quiz Performance */}
+                                <div className="bg-slate-900/60 border border-slate-800 p-6 rounded-xl space-y-3">
+                                    <h4 className="font-bold text-sm text-slate-300 uppercase tracking-wider">📝 Quiz Performance</h4>
+                                    {parentQuizPerf.length === 0 ? (
+                                        <p className="text-sm text-slate-500">No quiz attempts yet.</p>
+                                    ) : parentQuizPerf.map((q, i) => (
+                                        <div key={i} className="flex items-center justify-between p-3 bg-slate-950/40 border border-slate-800 rounded-lg">
+                                            <div>
+                                                <p className="text-sm text-slate-200">{q.topic}</p>
+                                                <span className="text-[10px] text-slate-500">{q.subject}</span>
+                                            </div>
+                                            <span className="text-sm font-semibold text-cyan-400">{q.percentage}%</span>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Assignments */}
+                                <div className="bg-slate-900/60 border border-slate-800 p-6 rounded-xl space-y-3">
+                                    <h4 className="font-bold text-sm text-slate-300 uppercase tracking-wider">📚 Assignments</h4>
+                                    {parentAssignments.length === 0 ? (
+                                        <p className="text-sm text-slate-500">No assignments yet.</p>
+                                    ) : parentAssignments.map((a) => (
+                                        <div key={a.id} className="flex items-center justify-between p-3 bg-slate-950/40 border border-slate-800 rounded-lg">
+                                            <div>
+                                                <p className="text-sm text-slate-200">{a.title}</p>
+                                                <span className="text-[10px] text-slate-500">{a.subject}</span>
+                                            </div>
+                                            <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${a.status === "Completed" ? "bg-emerald-500/15 text-emerald-400" : "bg-amber-500/15 text-amber-400"}`}>{a.status}</span>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Weak Subjects */}
+                                <div className="bg-slate-900/60 border border-slate-800 p-6 rounded-xl space-y-3">
+                                    <h4 className="font-bold text-sm text-slate-300 uppercase tracking-wider">⚠️ Areas to Improve</h4>
+                                    {parentWeak.length === 0 ? (
+                                        <p className="text-sm text-emerald-400">No weak areas detected — keep it up!</p>
+                                    ) : parentWeak.map((w, i) => (
+                                        <div key={i} className="flex items-center justify-between p-3 bg-rose-950/20 border border-rose-900/40 rounded-lg">
+                                            <span className="text-sm text-slate-200">{w.topic}</span>
+                                            <span className="text-sm font-semibold text-rose-400">{w.percentage}%</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </>
+                        )}
                     </div>
                 )}
 

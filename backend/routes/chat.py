@@ -1,3 +1,4 @@
+import re
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models.chat import Chat
@@ -6,6 +7,20 @@ from services.rag_service import retrieve_context
 from services.ai_service import generate_chat_reply
 
 chat_bp = Blueprint("chat", __name__)
+
+# Strip any embedded image data / image references so a text-only model is never
+# asked to read an image (which would surface "does not support image input").
+_IMAGE_PATTERN = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,[^\s\"'<>]+", re.IGNORECASE)
+_MD_IMG_PATTERN = re.compile(r"!\[[^\]]*\]\([^)]*\)", re.IGNORECASE)
+
+
+def sanitize_query(query):
+    if not isinstance(query, str):
+        return ""
+    cleaned = _MD_IMG_PATTERN.sub("", query)
+    cleaned = _IMAGE_PATTERN.sub("[image removed]", cleaned)
+    return cleaned.strip()
+
 
 @chat_bp.route("", methods=["POST"])
 @jwt_required()
@@ -16,7 +31,11 @@ def send_chat():
     if not data or not data.get("query"):
         return jsonify({"message": "Query string is required"}), 400
         
-    query = data["query"]
+    query = sanitize_query(data["query"])
+    if not query:
+        return jsonify({
+            "message": "Image inputs are not supported. Please type your question as text."
+        }), 400
     session_id = data.get("session_id")
     
     # Retrieve context chunks from user's notes (RAG pipeline)
